@@ -15,8 +15,6 @@ from docx.oxml import OxmlElement
 st.set_page_config(page_title="Generador de Consentimientos", layout="centered")
 st.title("🩺 Generador automatizado de Consentimientos Informados")
 
-st.write("Subí el modelo (.docx) y el Excel (.xlsx) con los datos filtrados para generar los documentos personalizados.")
-
 # Cargadores de archivos
 uploaded_docx = st.file_uploader("📄 Subí el documento modelo (.docx)", type="docx")
 uploaded_xlsx = st.file_uploader("📊 Subí el archivo Excel con los datos", type="xlsx")
