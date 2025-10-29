@@ -6,6 +6,20 @@ import openpyxl
 import streamlit as st
 from docx import Document
 from docx.shared import Pt, RGBColor
+from datetime import datetime
+from docx.oxml import OxmlElement
+
+# -----------------------------
+# Configuración básica de la app
+# -----------------------------
+st.set_page_config(page_title="Generador de Consentimientos", layout="centered")
+st.title("🩺 Generador automatizado de Consentimientos Informados")
+
+st.write("Subí el modelo (.docx) y el Excel (.xlsx) con los datos filtrados para generar los documentos personalizados.")
+
+# Cargadores de archivos
+uploaded_docx = st.file_uploader("📄 Subí el documento modelo (.docx)", type="docx")
+uploaded_xlsx = st.file_uploader("📊 Subí el archivo Excel con los datos", type="xlsx")
 
 # -----------------------------
 # Texto de reemplazo específico
@@ -73,7 +87,6 @@ def set_font_style(doc, font_name="Arial", font_size=11, font_color=RGBColor(0, 
             run.font.name = font_name
             run.font.size = Pt(font_size)
             run.font.color.rgb = font_color
-
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -100,10 +113,28 @@ def copy_footer(template_doc, target_doc):
     except Exception as e:
         print(f"No se pudo copiar el pie de página: {e}")
 
+def get_docx_creation_date(file):
+    """Intenta leer la fecha de creación o modificación del modelo."""
+    try:
+        from zipfile import ZipFile
+        from xml.etree import ElementTree as ET
+        with ZipFile(file) as docx:
+            core = docx.read("docProps/core.xml")
+            tree = ET.fromstring(core)
+            ns = {"dc": "http://purl.org/dc/elements/1.1/", "dcterms": "http://purl.org/dc/terms/"}
+            modified = tree.find("dcterms:modified", ns)
+            if modified is not None and modified.text:
+                dt = datetime.fromisoformat(modified.text.replace("Z", "+00:00"))
+                return dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+    # Si no puede leerla, usa la fecha actual
+    return datetime.now().strftime("%d/%m/%Y")
+
 # -----------------------------
 # Procesamiento de cada fila
 # -----------------------------
-def process_row_and_generate_doc(template_bytes, row):
+def process_row_and_generate_doc(template_bytes, row, fecha_modelo):
     template_doc = Document(io.BytesIO(template_bytes))
     doc = Document(io.BytesIO(template_bytes))
 
@@ -122,20 +153,16 @@ def process_row_and_generate_doc(template_bytes, row):
         "<<TELEFONO_24HS_SUBINV>>": str(row.get("TELEFONO 24HS subinvestigador", "")).strip(),
     }
 
-    # Si Subinvestigador está vacío, eliminar placeholders y párrafos relacionados
     if not replacements["<<SUBINVESTIGADOR>>"]:
         replacements.pop("<<SUBINVESTIGADOR>>", None)
         replacements.pop("<<TELEFONO_24HS_SUBINV>>", None)
-
         for p in find_paragraphs_containing(doc, "<<SUBINVESTIGADOR>>"):
             remove_paragraph(p)
         for p in find_paragraphs_containing(doc, "<<TELEFONO_24HS_SUBINV>>"):
             remove_paragraph(p)
 
-    # Reemplazar texto
     replace_text_in_doc(doc, replacements)
 
-    # Reglas por provincia
     prov = str(row.get("provincia", "")).strip().lower()
     texto_anticonceptivo_original = "El médico del estudio discutirá con usted qué métodos anticonceptivos"
 
@@ -152,7 +179,6 @@ def process_row_and_generate_doc(template_bytes, row):
                 remove_paragraph(p)
             except Exception:
                 pass
-
     elif prov.replace(" ", "") in ("buenosaires",):
         paras = find_paragraphs_containing(doc, texto_anticonceptivo_original)
         if paras:
@@ -167,13 +193,14 @@ def process_row_and_generate_doc(template_bytes, row):
                     r.text = ""
                 p.add_run(texto_ba_reemplazo)
 
-    # Aplicar formato general Arial 11 negro
+    # Formato y pie de página
     set_font_style(doc)
-
-    # Copiar pie de página del modelo
     copy_footer(template_doc, doc)
 
-    # Guardar en memoria
+    # Agregar fecha del modelo al final
+    doc.add_paragraph(f"Fecha del documento modelo: {fecha_modelo}")
+    set_font_style(doc)
+
     out_io = io.BytesIO()
     doc.save(out_io)
     out_io.seek(0)
@@ -182,9 +209,10 @@ def process_row_and_generate_doc(template_bytes, row):
 # -----------------------------
 # Ejecución principal
 # -----------------------------
-if uploaded_docx and uploaded_xlsx:
+if uploaded_docx is not None and uploaded_xlsx is not None:
+    fecha_modelo = get_docx_creation_date(uploaded_docx)
+
     try:
-        # Detectar filas visibles (filtradas) en el Excel
         wb = openpyxl.load_workbook(uploaded_xlsx, data_only=True)
         sheet = wb.active
         visible_rows = [i for i, row_dim in sheet.row_dimensions.items() if not row_dim.hidden]
@@ -198,20 +226,20 @@ if uploaded_docx and uploaded_xlsx:
         st.error(f"Error leyendo el Excel: {e}")
         st.stop()
 
+    uploaded_docx.seek(0)
     template_bytes = uploaded_docx.read()
 
     zip_io = io.BytesIO()
     with zipfile.ZipFile(zip_io, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for idx, row in df.iterrows():
             try:
-                doc_io = process_row_and_generate_doc(template_bytes, row)
+                doc_io = process_row_and_generate_doc(template_bytes, row, fecha_modelo)
             except Exception as e:
                 st.error(f"Error procesando fila {idx}: {e}")
                 continue
 
             inv = str(row.get("Investigador", "")).strip()
             centro = str(row.get("Nro. de Centro", "")).strip()
-
             safe_inv = re.sub(r'[\\/*?:"<>|]', "_", inv)[:100]
             safe_centro = re.sub(r'[\\/*?:"<>|]', "_", centro)[:50]
             filename = f"{safe_inv} - Centro {safe_centro}.docx" if safe_inv or safe_centro else f"doc_{idx}.docx"
@@ -219,7 +247,7 @@ if uploaded_docx and uploaded_xlsx:
             zf.writestr(filename, doc_io.getvalue())
 
     zip_io.seek(0)
-    st.success("✅ Documentos generados correctamente con formato Arial 11 negro y pie de página.")
+    st.success(f"✅ Documentos generados correctamente (modelo del {fecha_modelo}).")
     st.download_button(
         "📥 Descargar ZIP",
         data=zip_io.getvalue(),
@@ -227,4 +255,4 @@ if uploaded_docx and uploaded_xlsx:
         mime="application/zip"
     )
 else:
-    st.info("Subí el modelo .docx y el .xlsx para comenzar.")
+    st.info("👆 Subí el modelo .docx y el .xlsx para comenzar.")
