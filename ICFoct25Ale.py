@@ -149,14 +149,19 @@ def process_row_and_generate_doc(template_bytes, row):
 if uploaded_docx and uploaded_xlsx:
     try:
         # Leer Excel y detectar filas visibles
-        wb = openpyxl.load_workbook(uploaded_xlsx, data_only=True)
-        sheet = wb.active
-        visible_rows = [i for i, dim in sheet.row_dimensions.items() if not dim.hidden]
-        df_all = pd.read_excel(uploaded_xlsx, engine="openpyxl")
-        if visible_rows:
-            df = df_all.iloc[[i - 2 for i in visible_rows if i > 1]]
-        else:
-            df = df_all
+wb = openpyxl.load_workbook(uploaded_xlsx, data_only=True)
+sheet = wb.active
+
+# Cargar todos los datos con pandas
+df_all = pd.read_excel(uploaded_xlsx, engine="openpyxl")
+
+# Identificar filas ocultas por filtro
+hidden_rows = [idx for idx, row_dim in sheet.row_dimensions.items() if row_dim.hidden]
+if hidden_rows:
+    # Eliminar las filas ocultas del DataFrame
+    df = df_all.drop(df_all.index[[i - 2 for i in hidden_rows if i > 1]], errors="ignore")
+else:
+    df = df_all
     except Exception as e:
         st.error(f"Error leyendo el Excel: {e}")
         st.stop()
@@ -185,3 +190,4 @@ if uploaded_docx and uploaded_xlsx:
                        file_name="consentimientos_generados.zip", mime="application/zip")
 else:
     st.info("👆 Subí el modelo .docx y el .xlsx para comenzar.")
+
