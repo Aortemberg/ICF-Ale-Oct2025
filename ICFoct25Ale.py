@@ -7,10 +7,9 @@ from datetime import datetime
 import io
 import zipfile
 import re
-from docx.oxml import OxmlElement
 
 # -----------------------------
-# Configuración de la aplicación Streamlit
+# Configuración de Streamlit
 # -----------------------------
 st.set_page_config(page_title="Generador DOCX Consentimientos", layout="wide")
 
@@ -18,77 +17,52 @@ st.title("🩺 Generador automático de Consentimientos (Excel → Word)")
 
 st.markdown("""
 Subí tu **modelo.docx** (plantilla con placeholders `<<...>>`) y el **datos.xlsx** con la información de cada investigador.  
-El nombre del archivo final se construirá con el Investigador, el Nro. de Centro y el número de protocolo.
+El nombre del archivo final se construirá con el Investigador, el Nro. de Centro y el Número de Protocolo.
 """)
-
-# Cargadores de archivos
-uploaded_docx = st.file_uploader("📄 Subí el documento modelo (.docx)", type=["docx"])
-uploaded_xlsx = st.file_uploader("📊 Subí el Excel (.xlsx)", type=["xlsx"])
-
-# Variables globales
-texto_anticonceptivo_original = (
-    "El médico del estudio discutirá con usted qué método anticonceptivo se considera adecuado. "
-    "El patrocinador y/o el investigador del estudio garantizarán su acceso al método anticonceptivo "
-    "acordado y necesario para su participación en este estudio"
-)
-
-texto_ba_reemplazo = (
-    "El médico del estudio discutirá con usted qué métodos anticonceptivos se consideran adecuados. "
-    "El Patrocinador y/o el médico del estudio garantizará su acceso a este método anticonceptivo "
-    "acordado y necesario para su participación en el ensayo. El costo de los métodos anticonceptivos "
-    "seleccionados correrá a cargo del Patrocinador."
-)
 
 # -----------------------------
 # Funciones auxiliares
 # -----------------------------
 def remove_paragraph(paragraph):
-    """Elimina un párrafo completamente del documento."""
+    """Elimina completamente un párrafo del documento."""
     p = paragraph._element
     p.getparent().remove(p)
 
 def replace_text_in_runs(paragraph, old, new, font_name="Arial", font_size=11, font_color=RGBColor(0, 0, 0)):
-    """
-    Reemplaza texto en runs sin alterar el resto del formato,
-    aplicando Arial 11 negro solo al texto nuevo.
-    """
+    """Reemplaza texto dentro de runs sin modificar formato del resto."""
     for run in paragraph.runs:
         if old in run.text:
             run.text = run.text.replace(old, new)
-            # Aplica formato SOLO al texto reemplazado
             run.font.name = font_name
             run.font.size = Pt(font_size)
             run.font.color.rgb = font_color
 
 def replace_text_in_doc(doc, replacements):
-    """Aplica reemplazos en todo el documento."""
+    """Reemplaza texto en todo el documento, incluyendo tablas."""
     def process_paragraphs(paragraphs):
         for p in paragraphs:
             for old, new in replacements.items():
-                replace_text_in_runs(p, old, new)
-            # Fallback si el placeholder está partido en varios runs
-            if any(old in p.text for old in replacements.keys()):
-                fulltext = p.text
-                for old, new in replacements.items():
-                    if old in fulltext:
-                        for r in p.runs:
-                            r.text = ""
-                        new_run = p.add_run(fulltext.replace(old, new))
-                        new_run.font.name = "Arial"
-                        new_run.font.size = Pt(11)
-                        new_run.font.color.rgb = RGBColor(0, 0, 0)
+                if old in p.text:
+                    replace_text_in_runs(p, old, new)
+            # Fallback si el placeholder está dividido en varios runs
+            for old, new in replacements.items():
+                if old in p.text:
+                    fulltext = p.text
+                    for r in p.runs:
+                        r.text = ""
+                    new_run = p.add_run(fulltext.replace(old, new))
+                    new_run.font.name = "Arial"
+                    new_run.font.size = Pt(11)
+                    new_run.font.color.rgb = RGBColor(0, 0, 0)
 
-    # Párrafos principales
     process_paragraphs(doc.paragraphs)
-
-    # Tablas
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 process_paragraphs(cell.paragraphs)
 
 def find_paragraphs_containing(doc, snippet):
-    """Busca y devuelve todos los párrafos que contienen un texto dado."""
+    """Busca párrafos que contengan un texto determinado."""
     res = []
     for p in doc.paragraphs:
         if snippet.lower() in p.text.lower():
@@ -101,46 +75,35 @@ def find_paragraphs_containing(doc, snippet):
                         res.append(p)
     return res
 
-def get_docx_creation_date(file):
-    """Intenta leer la fecha del modelo desde los metadatos del Word."""
-    try:
-        from zipfile import ZipFile
-        from xml.etree import ElementTree as ET
-        file.seek(0)
-        with ZipFile(file) as docx:
-            core = docx.read("docProps/core.xml")
-            tree = ET.fromstring(core)
-            ns = {"dcterms": "http://purl.org/dc/terms/"}
-            modified = tree.find("dcterms:modified", ns)
-            if modified is not None and modified.text:
-                dt = datetime.fromisoformat(modified.text.replace("Z", "+00:00"))
-                return dt.strftime("%d/%m/%Y")
-    except Exception:
-        pass
-    return datetime.now().strftime("%d/%m/%Y")
-
 # -----------------------------
-# Procesamiento de cada fila
+# Generación de documento
 # -----------------------------
 def process_row_and_generate_doc(template_bytes, row):
+    """Genera un documento Word a partir de una fila del Excel."""
     doc = Document(io.BytesIO(template_bytes))
 
+    # Función para limpiar valores vacíos o NaN
+    def safe_value(val):
+        if pd.isna(val) or str(val).strip().lower() in ("nan", "none"):
+            return ""
+        return str(val).strip()
+
     replacements = {
-        "<<NUMERO_PROTOCOLO>>": str(row.get("Numero de protocolo", "")).strip(),
-        "<<TITULO_ESTUDIO>>": str(row.get("Titulo del Estudio", "")).strip(),
-        "<<PATROCINADOR>>": str(row.get("Patrocinador", "")).strip(),
-        "<<INVESTIGADOR>>": str(row.get("Investigador", "")).strip(),
-        "<<INSTITUCION>>": str(row.get("Institucion", "")).strip(),
-        "<<DIRECCION>>": str(row.get("Direccion", "")).strip(),
-        "<<CARGO_INVESTIGADOR>>": str(row.get("Cargo del Investigador en la Institucion", "")).strip(),
-        "<<Centro_Nro.>>": str(row.get("Nro. de Centro", "")).strip(),
-        "<<COMITE>>": str(row.get("COMITE", "")).strip(),
-        "<<SUBINVESTIGADOR>>": str(row.get("Subinvestigador", "")).strip(),
-        "<<TELEFONO_24HS>>": str(row.get("TELEFONO 24HS", "")).strip(),
-        "<<TELEFONO_24HS_SUBINV>>": str(row.get("TELEFONO 24HS subinvestigador", "")).strip(),
+        "<<NUMERO_PROTOCOLO>>": safe_value(row.get("Numero de protocolo", "")),
+        "<<TITULO_ESTUDIO>>": safe_value(row.get("Titulo del Estudio", "")),
+        "<<PATROCINADOR>>": safe_value(row.get("Patrocinador", "")),
+        "<<INVESTIGADOR>>": safe_value(row.get("Investigador", "")),
+        "<<INSTITUCION>>": safe_value(row.get("Institucion", "")),
+        "<<DIRECCION>>": safe_value(row.get("Direccion", "")),
+        "<<CARGO_INVESTIGADOR>>": safe_value(row.get("Cargo del Investigador en la Institucion", "")),
+        "<<Centro_Nro.>>": safe_value(row.get("Nro. de Centro", "")),
+        "<<COMITE>>": safe_value(row.get("COMITE", "")),
+        "<<SUBINVESTIGADOR>>": safe_value(row.get("Subinvestigador", "")),
+        "<<TELEFONO_24HS>>": safe_value(row.get("TELEFONO 24HS", "")),
+        "<<TELEFONO_24HS_SUBINV>>": safe_value(row.get("TELEFONO 24HS subinvestigador", "")),
     }
 
-    # ✅ Si Subinvestigador está vacío → eliminar placeholders y párrafos
+    # Lógica Subinvestigador vacío → eliminar secciones
     sub_val = replacements.get("<<SUBINVESTIGADOR>>", "")
     if not sub_val:
         for key in ["<<SUBINVESTIGADOR>>", "<<TELEFONO_24HS_SUBINV>>"]:
@@ -148,10 +111,9 @@ def process_row_and_generate_doc(template_bytes, row):
             for p in find_paragraphs_containing(doc, key):
                 remove_paragraph(p)
 
-    # Reemplazos con formato Arial 11 negro solo en los datos insertados
+    # Reemplazos con formato Arial 11 negro solo en texto nuevo
     replace_text_in_doc(doc, replacements)
 
-    # ✅ No se agrega ninguna leyenda de fecha aquí (eliminado por pedido)
     out_io = io.BytesIO()
     doc.save(out_io)
     out_io.seek(0)
@@ -160,12 +122,13 @@ def process_row_and_generate_doc(template_bytes, row):
 # -----------------------------
 # Ejecución principal
 # -----------------------------
-if uploaded_docx and uploaded_xlsx:
-    uploaded_docx.seek(0)
-    fecha_modelo = get_docx_creation_date(uploaded_docx)
+uploaded_docx = st.file_uploader("📄 Subí el documento modelo (.docx)", type=["docx"])
+uploaded_xlsx = st.file_uploader("📊 Subí el Excel (.xlsx)", type=["xlsx"])
 
+if uploaded_docx and uploaded_xlsx:
     try:
-        df = pd.read_excel(uploaded_xlsx, engine="openpyxl")
+        # Leemos el Excel manteniendo ceros iniciales
+        df = pd.read_excel(uploaded_xlsx, engine="openpyxl", dtype=str)
         if df.empty:
             st.error("⚠️ El archivo Excel está vacío.")
             st.stop()
@@ -190,6 +153,7 @@ if uploaded_docx and uploaded_xlsx:
                 centro = str(row.get("Nro. de Centro", "")).strip()
                 protocolo = str(row.get("Numero de protocolo", "")).strip()
 
+                # Limpieza de caracteres no válidos
                 safe_inv = re.sub(r'[\\/*?:"<>|]', "_", inv)[:100]
                 safe_centro = re.sub(r'[\\/*?:"<>|]', "_", centro)[:50]
                 safe_prot = re.sub(r'[\\/*?:"<>|]', "_", protocolo)[:50]
