@@ -25,7 +25,7 @@ El nombre del archivo final se construirá con el Investigador, el Nro. de Centr
 uploaded_docx = st.file_uploader("📄 Subí el documento modelo (.docx)", type=["docx"])
 uploaded_xlsx = st.file_uploader("📊 Subí el Excel (.xlsx)", type=["xlsx"])
 
-# Variables globales para lógica de reemplazo
+# Variables globales
 texto_anticonceptivo_original = (
     "El médico del estudio discutirá con usted qué método anticonceptivo se considera adecuado. "
     "El patrocinador y/o el investigador del estudio garantizarán su acceso al método anticonceptivo "
@@ -47,32 +47,48 @@ def remove_paragraph(paragraph):
     p = paragraph._element
     p.getparent().remove(p)
 
-def replace_text_in_runs(paragraph, old, new):
-    """Reemplaza texto en fragmentos de párrafo (runs) sin romper el formato original."""
+def replace_text_in_runs(paragraph, old, new, font_name="Arial", font_size=11, font_color=RGBColor(0, 0, 0)):
+    """
+    Reemplaza texto en runs sin alterar el resto del formato,
+    aplicando Arial 11 negro solo al texto nuevo.
+    """
     for run in paragraph.runs:
         if old in run.text:
             run.text = run.text.replace(old, new)
+            # Aplica formato SOLO al texto reemplazado
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+            run.font.color.rgb = font_color
 
 def replace_text_in_doc(doc, replacements):
-    """Aplica reemplazos en todos los párrafos y tablas del documento."""
+    """Aplica reemplazos en todo el documento."""
     def process_paragraphs(paragraphs):
         for p in paragraphs:
             for old, new in replacements.items():
                 replace_text_in_runs(p, old, new)
-            fulltext = p.text
-            for old, new in replacements.items():
-                if old in fulltext:
-                    for r in p.runs:
-                        r.text = ""
-                    p.add_run(fulltext.replace(old, new))
+            # Fallback si el placeholder está partido en varios runs
+            if any(old in p.text for old in replacements.keys()):
+                fulltext = p.text
+                for old, new in replacements.items():
+                    if old in fulltext:
+                        for r in p.runs:
+                            r.text = ""
+                        new_run = p.add_run(fulltext.replace(old, new))
+                        new_run.font.name = "Arial"
+                        new_run.font.size = Pt(11)
+                        new_run.font.color.rgb = RGBColor(0, 0, 0)
+
+    # Párrafos principales
     process_paragraphs(doc.paragraphs)
+
+    # Tablas
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 process_paragraphs(cell.paragraphs)
 
 def find_paragraphs_containing(doc, snippet):
-    """Busca y devuelve todos los párrafos que contienen el fragmento de texto dado."""
+    """Busca y devuelve todos los párrafos que contienen un texto dado."""
     res = []
     for p in doc.paragraphs:
         if snippet.lower() in p.text.lower():
@@ -86,7 +102,7 @@ def find_paragraphs_containing(doc, snippet):
     return res
 
 def get_docx_creation_date(file):
-    """Lee la fecha de modificación del modelo Word (si existe) o usa la fecha actual."""
+    """Intenta leer la fecha del modelo desde los metadatos del Word."""
     try:
         from zipfile import ZipFile
         from xml.etree import ElementTree as ET
@@ -103,27 +119,10 @@ def get_docx_creation_date(file):
         pass
     return datetime.now().strftime("%d/%m/%Y")
 
-def set_global_font_style(doc, font_name="Arial", font_size=11, font_color=RGBColor(0, 0, 0)):
-    """Aplica formato de fuente consistente a todo el documento, incluyendo tablas."""
-    font_size_pt = Pt(font_size)
-    for p in doc.paragraphs:
-        for run in p.runs:
-            run.font.name = font_name
-            run.font.size = font_size_pt
-            run.font.color.rgb = font_color
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    for run in p.runs:
-                        run.font.name = font_name
-                        run.font.size = font_size_pt
-                        run.font.color.rgb = font_color
-
 # -----------------------------
 # Procesamiento de cada fila
 # -----------------------------
-def process_row_and_generate_doc(template_bytes, row, fecha_modelo):
+def process_row_and_generate_doc(template_bytes, row):
     doc = Document(io.BytesIO(template_bytes))
 
     replacements = {
@@ -141,7 +140,7 @@ def process_row_and_generate_doc(template_bytes, row, fecha_modelo):
         "<<TELEFONO_24HS_SUBINV>>": str(row.get("TELEFONO 24HS subinvestigador", "")).strip(),
     }
 
-    # ✅ Si Subinvestigador está vacío → eliminar párrafos y placeholders relacionados
+    # ✅ Si Subinvestigador está vacío → eliminar placeholders y párrafos
     sub_val = replacements.get("<<SUBINVESTIGADOR>>", "")
     if not sub_val:
         for key in ["<<SUBINVESTIGADOR>>", "<<TELEFONO_24HS_SUBINV>>"]:
@@ -149,15 +148,10 @@ def process_row_and_generate_doc(template_bytes, row, fecha_modelo):
             for p in find_paragraphs_containing(doc, key):
                 remove_paragraph(p)
 
-    # Reemplazar placeholders
+    # Reemplazos con formato Arial 11 negro solo en los datos insertados
     replace_text_in_doc(doc, replacements)
 
-    # Aplicar formato Arial 11 negro a todo
-    set_global_font_style(doc)
-
-    # Agregar línea final con fecha de modelo
-    doc.add_paragraph(f"Documento basado en modelo de fecha: {fecha_modelo}")
-
+    # ✅ No se agrega ninguna leyenda de fecha aquí (eliminado por pedido)
     out_io = io.BytesIO()
     doc.save(out_io)
     out_io.seek(0)
@@ -187,7 +181,7 @@ if uploaded_docx and uploaded_xlsx:
         with zipfile.ZipFile(zip_io, "w", zipfile.ZIP_DEFLATED) as zf:
             for idx, row in df.iterrows():
                 try:
-                    doc_io = process_row_and_generate_doc(template_bytes, row.to_dict(), fecha_modelo)
+                    doc_io = process_row_and_generate_doc(template_bytes, row.to_dict())
                 except Exception as e:
                     st.error(f"Error procesando fila {idx + 2}: {e}")
                     continue
